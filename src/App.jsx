@@ -1,9 +1,15 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { db } from "./firebase";
+import { doc, setDoc, onSnapshot } from "firebase/firestore";
 
+const ROOM_ID = "main-room";
+
+// 🔀 สุ่ม
 function shuffle(arr) {
   return [...arr].sort(() => Math.random() - 0.5);
 }
 
+// 👤 สร้าง player
 function createPlayers(names) {
   return names.map(name => ({
     name,
@@ -34,8 +40,29 @@ export default function App() {
   const [queue, setQueue] = useState([]);
   const [courts, setCourts] = useState([]);
 
+  // 🔥 realtime sync
+  useEffect(() => {
+    const unsub = onSnapshot(doc(db, "rooms", ROOM_ID), (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+
+        setNamesInput(data.namesInput || "");
+        setCourtCount(data.courtCount || 2);
+        setQueue(data.queue || []);
+        setCourts(data.courts || []);
+      }
+    });
+
+    return () => unsub();
+  }, []);
+
+  // 🔥 save
+  const saveData = async (data) => {
+    await setDoc(doc(db, "rooms", ROOM_ID), data);
+  };
+
   // 🚀 เริ่มเกม
-  const startGame = () => {
+  const startGame = async () => {
     let names = namesInput
       .split("\n")
       .map(n => n.trim())
@@ -53,6 +80,7 @@ export default function App() {
       }));
 
       newCourts.push({
+        name: `สนาม ${i + 1}`, // ✅ มีชื่อสนาม
         players: playersInCourt,
         loserTeam: null
       });
@@ -60,25 +88,54 @@ export default function App() {
 
     setQueue(q);
     setCourts(newCourts);
+
+    await saveData({
+      namesInput,
+      courtCount,
+      queue: q,
+      courts: newCourts
+    });
   };
 
   // 🔥 เลือกทีมแพ้
-  const selectLoserTeam = (courtIndex, teamIndex) => {
-    setCourts(prev =>
-      prev.map((court, i) =>
-        i === courtIndex
-          ? {
-              ...court,
-              loserTeam:
-                court.loserTeam === teamIndex ? null : teamIndex
-            }
-          : court
-      )
+  const selectLoserTeam = async (courtIndex, teamIndex) => {
+    const newCourts = courts.map((court, i) =>
+      i === courtIndex
+        ? {
+            ...court,
+            loserTeam:
+              court.loserTeam === teamIndex ? null : teamIndex
+          }
+        : court
     );
+
+    setCourts(newCourts);
+
+    await saveData({
+      namesInput,
+      courtCount,
+      queue,
+      courts: newCourts
+    });
+  };
+
+  // 🔥 เปลี่ยนชื่อสนาม
+  const updateCourtName = async (index, newName) => {
+    const newCourts = [...courts];
+    newCourts[index].name = newName;
+
+    setCourts(newCourts);
+
+    await saveData({
+      namesInput,
+      courtCount,
+      queue,
+      courts: newCourts
+    });
   };
 
   // 🔥 จบรอบสนามเดียว
-  const endCourt = (courtIndex) => {
+  const endCourt = async (courtIndex) => {
     const court = courts[courtIndex];
 
     if (court.loserTeam === null) {
@@ -119,27 +176,32 @@ export default function App() {
       played: p.played + 1
     }));
 
-    setCourts(prev =>
-      prev.map((c, i) =>
-        i === courtIndex
-          ? { players: nextPlayers, loserTeam: null }
-          : c
-      )
+    const newCourts = courts.map((c, i) =>
+      i === courtIndex
+        ? { ...c, players: nextPlayers, loserTeam: null }
+        : c
     );
 
     setQueue(newQueue);
+    setCourts(newCourts);
+
+    await saveData({
+      namesInput,
+      courtCount,
+      queue: newQueue,
+      courts: newCourts
+    });
   };
 
-  // 🔥 format queue เป็นคู่
   const { pairs, leftover } = formatQueue(queue);
 
   return (
-    <div style={{ padding: 20, fontFamily: "sans-serif" }}>
-      <h1>🏸 Badminton Queue (Multi Court)</h1>
+    <div style={{ padding: 20 }}>
+      <h1>🏸 Badminton Queue (Realtime)</h1>
 
       <textarea
-        rows={8}
-        placeholder="ใส่ชื่อ (1 บรรทัด ต่อ 1 คน)"
+        rows={6}
+        placeholder="ใส่ชื่อ"
         value={namesInput}
         onChange={(e) => setNamesInput(e.target.value)}
         style={{ width: "100%" }}
@@ -160,18 +222,28 @@ export default function App() {
       <hr />
 
       {courts.map((court, i) => {
-        const team1 = court.players.slice(0, 2);
-        const team2 = court.players.slice(2, 4);
+        const team1 = court.players?.slice(0, 2) || [];
+        const team2 = court.players?.slice(2, 4) || [];
 
         const isLoser1 = court.loserTeam === 0;
         const isLoser2 = court.loserTeam === 1;
 
         return (
           <div key={i} style={{ marginBottom: 30 }}>
-            <h2>🏟️ สนาม {i + 1}</h2>
+            {/* 🔥 แก้ชื่อสนาม */}
+            <input
+              value={court.name || ""}
+              onChange={(e) =>
+                updateCourtName(i, e.target.value)
+              }
+              style={{
+                fontSize: "18px",
+                fontWeight: "bold",
+                marginBottom: "10px"
+              }}
+            />
 
             <div>
-              สถานะ:{" "}
               {court.loserTeam === null
                 ? "ยังไม่เลือกทีมแพ้"
                 : `เลือกคู่ ${court.loserTeam + 1}`}
@@ -218,18 +290,6 @@ export default function App() {
             <button
               onClick={() => endCourt(i)}
               disabled={court.loserTeam === null}
-              style={{
-                marginTop: "10px",
-                background:
-                  court.loserTeam !== null ? "black" : "gray",
-                color: "white",
-                padding: "8px 12px",
-                border: "none",
-                cursor:
-                  court.loserTeam !== null
-                    ? "pointer"
-                    : "not-allowed"
-              }}
             >
               จบรอบสนามนี้
             </button>
@@ -241,7 +301,6 @@ export default function App() {
 
       <h2>⏳ คิวรอ</h2>
 
-      {/* 🔥 แสดงเป็นคู่ */}
       {pairs.map((pair, i) => (
         <div key={i}>
           {i === 0 && "🔥 "}
@@ -249,12 +308,7 @@ export default function App() {
         </div>
       ))}
 
-      {/* 🔥 เศษ */}
-      {leftover && (
-        <div style={{ marginTop: "8px", color: "red" }}>
-          เศษ: {leftover.name}
-        </div>
-      )}
+      {leftover && <div>เศษ: {leftover.name}</div>}
     </div>
   );
 }
